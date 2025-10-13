@@ -43,10 +43,27 @@ static void checkCudaError(cudaError_t result, const char *message) {
 }
 #endif
 
+#ifdef USE_ROCM
+#include <bits/stdint-uintn.h>
+#include <hip/hip_runtime.h>
+
+#include <cassert>
+
+#include "common/base/status.h"
+
+static void checkRocmError(hipError_t result, const char *message) {
+    if (result != hipSuccess) {
+        LOG(ERROR) << message << " (Error code: " << result << " - "
+                   << hipGetErrorString(result) << ")" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+}
+#endif
+
 #include "transfer_engine.h"
 #include "transport/transport.h"
 
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
 DEFINE_int32(gpu_id, 0, "GPU ID to use");
 #endif
 

@@ -18,6 +18,10 @@
 #include <cuda_runtime.h>
 #endif
 
+#ifdef USE_ROCM
+#include <hip/hip_runtime.h>
+#endif
+
 namespace mooncake {
 
 uintptr_t alignPage(uintptr_t address) { return address & ~(pagesize - 1); }
@@ -49,6 +53,24 @@ const std::vector<MemoryLocationEntry> getMemoryLocation(void *start,
     }
 
     if (attributes.type == cudaMemoryTypeDevice) {
+        entries.push_back(
+            {(uint64_t)start, len, genGpuNodeName(attributes.device)});
+        return entries;
+    }
+#endif
+
+#ifdef USE_ROCM
+    hipPointerAttribute_t attributes;
+    hipError_t result;
+    result = hipPointerGetAttributes(&attributes, start);
+    if (result != hipSuccess) {
+        LOG(ERROR) << "hipPointerGetAttributes failed (Error code: " << result
+                   << " - " << hipGetErrorString(result) << ")" << std::endl;
+        entries.push_back({(uint64_t)start, len, kWildcardLocation});
+        return entries;
+    }
+
+    if (attributes.type == hipMemoryTypeDevice) {
         entries.push_back(
             {(uint64_t)start, len, genGpuNodeName(attributes.device)});
         return entries;

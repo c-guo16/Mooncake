@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
-project(mooncake CXX C)
+if (USE_CUDA)
+  project(mooncake CXX C)
+elseif (USE_ROCM)
+  project(mooncake LANGUAGES HIP CXX C)
+endif()
 
 # indicates cmake is invoked from top-level dir
 set(GLOBAL_CONFIG "true")

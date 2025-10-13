@@ -18,6 +18,10 @@
 #include <cuda.h>
 #endif
 
+#ifdef USE_ROCM
+#include <hip/hip_runtime.h>
+#endif
+
 #include <fcntl.h>
 #include <sys/epoll.h>
 
@@ -230,6 +234,37 @@ int RdmaContext::registerMemoryRegionInternal(void *addr, size_t length,
         if (result != CUDA_SUCCESS) {
             const char *errStr;
             cuGetErrorString(result, &errStr);
+            LOG(ERROR) << "Failed to retrieve dmabuf for " << (uintptr_t)addr
+                       << " cuda error=" << errStr;
+            return ERR_CONTEXT;
+        }
+        mrMeta.addr = addr;
+        mrMeta.mr = ibv_reg_dmabuf_mr(pd_, 0 /* offset */, length,
+                                      (uintptr_t)addr, dmabuf_fd, access);
+    }
+// TODO : implement register memory in a way that does not assume the presence of amd-peermem
+#elif !defined(WITH_AMD_PEERMEM) && defined(USE_ROCM)
+    // Implement register memory in a way that does not assume the presence of
+    // amd-peermem. If memory is on CPU call ibv_reg_mr() as usual. If memory
+    // is on GPU then use ibv_reg_dmabuf_mr() instead which does not require
+    // amd-peermem.
+    hipPointerAttribute_t attr;
+    hipError_t result = hipPointerGetAttributes(&attr, addr);
+
+    // Register memory depending on whether memory is on host or GPU.
+    if (result != hipSuccess || attr.type == hipMemoryTypeHost) {
+        mrMeta.addr = addr;
+        mrMeta.mr = ibv_reg_mr(pd_, addr, length, access);
+    } else if (attr.type == hipMemoryTypeDevice) {
+        size_t allocSize;
+        hipPointerGetAttribute(&allocSize, HIP_POINTER_ATTRIBUTE_RANGE_SIZE, (hipDeviceptr_t)addr);
+        int dmabuf_fd;
+        result = hipMemGetHandleForAddressRange(
+            &dmabuf_fd, (hipDeviceptr_t)addr, allocSize,
+            hipMemRangeHandleTypeDmaBufFd, 0);
+        if (result != hipSuccess) {
+            const char *errStr;
+            hipGetErrorString(result, &errStr);
             LOG(ERROR) << "Failed to retrieve dmabuf for " << (uintptr_t)addr
                        << " cuda error=" << errStr;
             return ERR_CONTEXT;

@@ -54,6 +54,20 @@ static void checkCudaError(cudaError_t result, const char *message) {
 }
 #endif
 
+#ifdef USE_ROCM
+#include <hip/hip_runtime.h>
+
+#include <cassert>
+
+static void checkRocmError(hipError_t result, const char *message) {
+    if (result != hipSuccess) {
+        LOG(ERROR) << message << " (Error code: " << result << " - "
+                   << hipGetErrorString(result) << ")" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+}
+#endif
+
 const static int NR_SOCKETS =
     numa_available() == 0 ? numa_num_configured_nodes() : 1;
 
@@ -84,7 +98,7 @@ DEFINE_bool(auto_discovery, false, "Enable auto discovery");
 DEFINE_string(report_unit, "GB", "Report unit: GB|GiB|Gb|MB|MiB|Mb|KB|KiB|Kb");
 DEFINE_uint32(report_precision, 2, "Report precision");
 
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
 DEFINE_bool(use_vram, true, "Allocate memory from GPU VRAM");
 DEFINE_int32(gpu_id, 0, "GPU ID to use, -1 for all GPUs");
 #endif
@@ -113,6 +127,23 @@ static void *allocateMemoryPool(size_t size, int buffer_id,
         return d_buf;
     }
 #endif
+
+#ifdef USE_ROCM
+    if (from_vram) {
+        int gpu_id;
+        if (FLAGS_gpu_id == -1) {
+            gpu_id = buffer_id;
+        } else {
+            gpu_id = FLAGS_gpu_id;
+        }
+        void *d_buf;
+        LOG(INFO) << "Allocating memory on GPU " << gpu_id;
+        checkRocmError(hipSetDevice(gpu_id), "Failed to set device");
+        checkRocmError(hipMalloc(&d_buf, size),
+                       "Failed to allocate device memory");
+        return d_buf;
+    }
+#endif
     return numa_alloc_onnode(size, buffer_id);
 }
 
@@ -135,6 +166,24 @@ static void freeMemoryPool(void *addr, size_t size) {
         cudaFree(addr);
     } else if (attributes.type == cudaMemoryTypeHost ||
                attributes.type == cudaMemoryTypeUnregistered) {
+        numa_free(addr, size);
+    } else {
+        LOG(ERROR) << "Unknown memory type, " << addr << " " << attributes.type;
+    }
+#else
+    numa_free(addr, size);
+#endif
+
+#ifdef USE_ROCM
+    // check pointer on GPU
+    hipPointerAttribute_t attributes;
+    checkRocmError(hipPointerGetAttributes(&attributes, addr),
+                   "Failed to get pointer attributes");
+
+    if (attributes.type == hipMemoryTypeDevice) {
+        hipFree(addr);
+    } else if (attributes.type == hipMemoryTypeHost ||
+               attributes.type == hipMemoryTypeUnregistered) {
         numa_free(addr, size);
     } else {
         LOG(ERROR) << "Unknown memory type, " << addr << " " << attributes.type;
@@ -347,6 +396,43 @@ int initiator() {
             name_prefix + std::to_string(name_suffix));
         LOG_ASSERT(!rc);
     }
+#elif defined(USE_ROCM)
+if (FLAGS_use_vram) {
+    int gpu_num;
+    LOG(INFO) << "VRAM is used";
+    if (FLAGS_gpu_id == -1 && hipGetDeviceCount(&gpu_num) == hipSuccess) {
+        LOG(INFO) << "GPU ID is not specified, found " << gpu_num
+                  << " GPUs to use";
+        buffer_num = gpu_num;
+    } else {
+        LOG(INFO) << "GPU ID is specified or failed to get GPU count, use "
+                  << FLAGS_gpu_id << " GPU";
+        buffer_num = 1;
+    }
+} else {
+    LOG(INFO) << "DRAM is used, numa node num: " << NR_SOCKETS;
+}
+addr.resize(buffer_num);
+for (int i = 0; i < buffer_num; ++i) {
+    addr[i] = allocateMemoryPool(FLAGS_buffer_size, i, FLAGS_use_vram);
+    std::string name_prefix;
+    int name_suffix;
+    if (FLAGS_use_vram) {
+        name_prefix = "cuda:";
+        if (FLAGS_gpu_id == -1) {
+            name_suffix = i;
+        } else {
+            name_suffix = FLAGS_gpu_id;
+        }
+    } else {
+        name_prefix = "cpu:";
+        name_suffix = i;
+    }
+    int rc = engine->registerLocalMemory(
+        addr[i], FLAGS_buffer_size,
+        name_prefix + std::to_string(name_suffix));
+    LOG_ASSERT(!rc);
+}
 #else
     LOG(INFO) << "DRAM is used, numa node num: " << NR_SOCKETS;
     addr.resize(buffer_num);
@@ -440,6 +526,43 @@ int target() {
         } else {
             LOG(INFO) << "GPU ID is specified or failed to get GPU count, use "
                       << FLAGS_gpu_id << " GPU";
+            buffer_num = 1;
+        }
+    } else {
+        LOG(INFO) << "DRAM is used, numa node num: " << NR_SOCKETS;
+    }
+    addr.resize(buffer_num);
+    for (int i = 0; i < buffer_num; ++i) {
+        addr[i] = allocateMemoryPool(FLAGS_buffer_size, i, FLAGS_use_vram);
+        std::string name_prefix;
+        int name_suffix;
+        if (FLAGS_use_vram) {
+            name_prefix = "cuda:";
+            if (FLAGS_gpu_id == -1) {
+                name_suffix = i;
+            } else {
+                name_suffix = FLAGS_gpu_id;
+            }
+        } else {
+            name_prefix = "cpu:";
+            name_suffix = i;
+        }
+        int rc = engine->registerLocalMemory(
+            addr[i], FLAGS_buffer_size,
+            name_prefix + std::to_string(name_suffix));
+        LOG_ASSERT(!rc);
+    }
+#elif defined(USE_ROCM)
+    if (FLAGS_use_vram) {
+        int gpu_num;
+        LOG(INFO) << "VRAM is used";
+        if (FLAGS_gpu_id == -1 && hipGetDeviceCount(&gpu_num) == hipSuccess) {
+            LOG(INFO) << "GPU ID is not specified, found " << gpu_num
+                    << " GPUs to use";
+            buffer_num = gpu_num;
+        } else {
+            LOG(INFO) << "GPU ID is specified or failed to get GPU count, use "
+                    << FLAGS_gpu_id << " GPU";
             buffer_num = 1;
         }
     } else {

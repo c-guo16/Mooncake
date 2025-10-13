@@ -53,6 +53,21 @@ static void checkCudaError(cudaError_t result, const char *message) {
 }
 #endif
 
+#ifdef USE_ROCM
+#include <bits/stdint-uintn.h>
+#include <hip/hip_runtime.h>
+
+#include <cassert>
+
+static void checkRocmError(hipError_t result, const char *message) {
+    if (result != hipSuccess) {
+        LOG(ERROR) << message << " (Error code: " << result << " - "
+                   << hipGetErrorString(result) << ")" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+}
+#endif
+
 #define NR_SOCKETS (1)
 
 DEFINE_string(local_server_name, mooncake::getHostname(),
@@ -72,7 +87,7 @@ DEFINE_string(nic_priority_matrix, "",
 
 DEFINE_string(segment_id, "192.168.3.76", "Segment ID to access data");
 
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
 DEFINE_bool(use_vram, true, "Allocate memory from GPU VRAM");
 DEFINE_int32(gpu_id, 0, "GPU ID to use");
 #endif
@@ -91,6 +106,16 @@ static void *allocateMemoryPool(size_t size, int socket_id,
         return d_buf;
     }
 #endif
+#ifdef USE_ROCM
+    if (from_vram) {
+        int gpu_id = FLAGS_gpu_id;
+        void *d_buf;
+        checkRocmError(hipSetDevice(gpu_id), "Failed to set device");
+        checkRocmError(hipMalloc(&d_buf, size),
+                       "Failed to allocate device memory");
+        return d_buf;
+    }
+#endif
     return numa_alloc_onnode(size, socket_id);
 }
 
@@ -104,6 +129,22 @@ static void freeMemoryPool(void *addr, size_t size) {
     if (attributes.type == cudaMemoryTypeDevice) {
         cudaFree(addr);
     } else if (attributes.type == cudaMemoryTypeHost) {
+        numa_free(addr, size);
+    } else {
+        LOG(ERROR) << "Unknown memory type";
+    }
+#else
+    numa_free(addr, size);
+#endif
+#ifdef USE_ROCM
+    // check pointer on GPU
+    hipPointerAttribute_t attributes;
+    checkRocmError(hipPointerGetAttributes(&attributes, addr),
+                   "Failed to get pointer attributes");
+
+    if (attributes.type == hipMemoryTypeDevice) {
+        hipFree(addr);
+    } else if (attributes.type == hipMemoryTypeHost) {
         numa_free(addr, size);
     } else {
         LOG(ERROR) << "Unknown memory type";
@@ -257,7 +298,8 @@ int initiator() {
     LOG_ASSERT(xport);
 
     void *addr = nullptr;
-#ifdef USE_CUDA
+// TODO : support name suffix for cuda/rocm/other-type-gpus
+#if defined(USE_CUDA) || defined(USE_ROCM)
     addr = allocateMemoryPool(ram_buffer_size, 0, FLAGS_use_vram);
     std::string name_prefix = FLAGS_use_vram ? "cuda:" : "cpu:";
     int name_suffix = FLAGS_use_vram ? FLAGS_gpu_id : 0;

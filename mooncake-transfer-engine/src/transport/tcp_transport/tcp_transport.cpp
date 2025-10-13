@@ -35,6 +35,10 @@
 #include <cuda_runtime.h>
 #endif
 
+#ifdef USE_ROCM
+#include <hip/hip_runtime.h>
+#endif
+
 namespace mooncake {
 using tcpsocket = asio::ip::tcp::socket;
 const static size_t kDefaultBufferSize = 65536;
@@ -51,6 +55,16 @@ static bool isCudaMemory(void *addr) {
     auto status = cudaPointerGetAttributes(&attributes, addr);
     if (status != cudaSuccess) return false;
     if (attributes.type == cudaMemoryTypeDevice) return true;
+    return false;
+}
+#endif
+
+#ifdef USE_ROCM
+static bool isRocmMemory(void *addr) {
+    hipPointerAttribute_t attributes;
+    auto status = hipPointerGetAttributes(&attributes, addr);
+    if (status != hipSuccess) return false;
+    if (attributes.type == hipMemoryTypeDevice) return true;
     return false;
 }
 #endif
@@ -154,12 +168,26 @@ struct Session : public std::enable_shared_from_this<Session> {
         }
 #endif
 
+#ifdef USE_ROCM
+        if (isRocmMemory(addr)) {
+            dram_buffer = new char[buffer_size];
+            hipMemcpy(dram_buffer, addr + total_transferred_bytes_,
+                       buffer_size, hipMemcpyDefault);
+        }
+#endif
+
         asio::async_write(
             socket_, asio::buffer(dram_buffer, buffer_size),
             [this, addr, dram_buffer, self](const asio::error_code &ec,
                                             std::size_t transferred_bytes) {
 #ifdef USE_CUDA
                 if (isCudaMemory(addr)) {
+                    delete[] dram_buffer;
+                }
+#endif
+
+#ifdef USE_ROCM
+                if (isRocmMemory(addr)) {
                     delete[] dram_buffer;
                 }
 #endif
@@ -206,9 +234,19 @@ struct Session : public std::enable_shared_from_this<Session> {
         bool is_cuda_memory = false;
 #endif
 
+#ifdef USE_ROCM
+        bool is_rocm_memory = isRocmMemory(addr);
+        if (is_rocm_memory) {
+            dram_buffer = new char[buffer_size];
+        }
+#else
+        bool is_rocm_memory = false;
+#endif
+
+        bool is_gpu_memory = is_cuda_memory || is_rocm_memory;
         asio::async_read(
             socket_, asio::buffer(dram_buffer, buffer_size),
-            [this, addr, dram_buffer, is_cuda_memory, self](
+            [this, addr, dram_buffer, is_gpu_memory, self](
                 const asio::error_code &ec, std::size_t transferred_bytes) {
                 if (ec) {
                     LOG(ERROR)
@@ -221,7 +259,11 @@ struct Session : public std::enable_shared_from_this<Session> {
                         << ", current transferred_bytes: " << transferred_bytes;
                     if (on_finalize_) on_finalize_(TransferStatusEnum::FAILED);
 #ifdef USE_CUDA
-                    if (is_cuda_memory) delete[] dram_buffer;
+                    if (is_gpu_memory) delete[] dram_buffer;
+#endif
+
+#ifdef USE_ROCM
+                    if (is_gpu_memory) delete[] dram_buffer;
 #endif
                     session_mutex_.unlock();
                     return;
@@ -229,7 +271,13 @@ struct Session : public std::enable_shared_from_this<Session> {
 #ifdef USE_CUDA
                 cudaMemcpy(addr + total_transferred_bytes_, dram_buffer,
                            transferred_bytes, cudaMemcpyDefault);
-                if (is_cuda_memory) delete[] dram_buffer;
+                if (is_gpu_memory) delete[] dram_buffer;
+#endif
+
+#ifdef USE_ROCM
+                hipMemcpy(addr + total_transferred_bytes_, dram_buffer,
+                           transferred_bytes, hipMemcpyDefault);
+                if (is_gpu_memory) delete[] dram_buffer;
 #endif
                 total_transferred_bytes_ += transferred_bytes;
                 readBody();

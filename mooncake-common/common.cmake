@@ -57,6 +57,7 @@ option(BUILD_EXAMPLES "Build examples" ON)
 
 option(BUILD_UNIT_TESTS "Build unit tests" ON)
 option(USE_CUDA "option for enabling gpu features" OFF)
+option(USE_ROCM "option for supporting AMD ROCM platform" OFF)
 option(USE_NVMEOF "option for using NVMe over Fabric" OFF)
 option(USE_TCP "option for using TCP transport" ON)
 option(USE_ASCEND "option for using npu with HCCL" OFF)
@@ -72,6 +73,7 @@ option(WITH_RUST_EXAMPLE "build the Rust interface and sample code for the trans
 option(WITH_METRICS "enable metrics and metrics reporting thread" ON)
 option(USE_3FS "option for using 3FS storage backend" OFF)
 option(WITH_NVIDIA_PEERMEM "disable to support RDMA without nvidia-peermem. If WITH_NVIDIA_PEERMEM=OFF then USE_CUDA=ON is required." ON)
+option(WITH_AMD_PEERMEM "disable to support RDMA without amd-peermem. If WITH_AMD_PEERMEM=OFF then USE_ROCM=ON is required." ON)
 
 option(USE_LRU_MASTER "option for using LRU in master service" OFF)
 set(LRU_MAX_CAPACITY 1000)
@@ -102,6 +104,18 @@ if (USE_CUDA)
     /usr/local/cuda/lib
     /usr/local/cuda/lib64
   )
+endif()
+
+if (USE_ROCM)
+  add_compile_definitions(USE_ROCM)
+  add_compile_definitions(__HIP_PLATFORM_AMD__)
+  message(STATUS "ROCM support is enabled")
+  include_directories(/opt/rocm/include)
+  link_directories(
+    /opt/rocm/lib
+    /opt/rocm/libexec
+  )
+  find_package(hip REQUIRED)
 endif()
 
 if (USE_CXL)
@@ -173,6 +187,10 @@ endif()
 
 if(WITH_NVIDIA_PEERMEM)
   add_compile_definitions(WITH_NVIDIA_PEERMEM)
+endif()
+
+if(WITH_AMD_PEERMEM)
+  add_compile_definitions(WITH_AMD_PEERMEM)
 endif()
 
 set(GFLAGS_USE_TARGET_NAMESPACE "true")

@@ -47,6 +47,11 @@ if (USE_CUDA)
   endif()
 endif()
 
+if (USE_ROCM)
+  target_include_directories(transfer_engine PRIVATE /opt/rocm/include)
+  target_link_libraries(transfer_engine PUBLIC hip::device hip::host rt)
+endif()
+
 if (USE_ASCEND)
   target_link_libraries(transfer_engine PUBLIC ascendcl hccl ascend_transport MPI::MPI)
 endif()

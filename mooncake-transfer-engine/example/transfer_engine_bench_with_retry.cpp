@@ -49,6 +49,21 @@ static void checkCudaError(cudaError_t result, const char *message) {
 }
 #endif
 
+#ifdef USE_ROCM
+#include <bits/stdint-uintn.h>
+#include <hip/hip_runtime.h>
+
+#include <cassert>
+
+static void checkRocmError(hipError_t result, const char *message) {
+    if (result != hipSuccess) {
+        LOG(ERROR) << message << " (Error code: " << result << " - "
+                   << hipGetErrorString(result) << ")" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+}
+#endif
+
 const static int NR_SOCKETS =
     numa_available() == 0 ? numa_num_configured_nodes() : 1;
 
@@ -77,7 +92,7 @@ DEFINE_bool(auto_discovery, false, "Enable auto discovery");
 DEFINE_string(report_unit, "GB", "Report unit: GB|GiB|Gb|MB|MiB|Mb|KB|KiB|Kb");
 DEFINE_uint32(report_precision, 2, "Report precision");
 
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
 DEFINE_bool(use_vram, true, "Allocate memory from GPU VRAM");
 DEFINE_int32(gpu_id, 0, "GPU ID to use");
 #endif
@@ -96,6 +111,17 @@ static void *allocateMemoryPool(size_t size, int socket_id,
         return d_buf;
     }
 #endif
+
+#ifdef USE_ROCM
+    if (from_vram) {
+        int gpu_id = FLAGS_gpu_id;
+        void *d_buf;
+        checkRocmError(hipSetDevice(gpu_id), "Failed to set device");
+        checkRocmError(hipMalloc(&d_buf, size),
+                       "Failed to allocate device memory");
+        return d_buf;
+    }
+#endif
     return numa_alloc_onnode(size, socket_id);
 }
 
@@ -110,6 +136,24 @@ static void freeMemoryPool(void *addr, size_t size) {
         cudaFree(addr);
     } else if (attributes.type == cudaMemoryTypeHost ||
                attributes.type == cudaMemoryTypeUnregistered) {
+        numa_free(addr, size);
+    } else {
+        LOG(ERROR) << "Unknown memory type, " << addr << " " << attributes.type;
+    }
+#else
+    numa_free(addr, size);
+#endif
+
+#ifdef USE_ROCM
+    // check pointer on GPU
+    hipPointerAttribute_t attributes;
+    checkRocmError(hipPointerGetAttributes(&attributes, addr),
+                   "Failed to get pointer attributes");
+
+    if (attributes.type == hipMemoryTypeDevice) {
+        hipFree(addr);
+    } else if (attributes.type == hipMemoryTypeHost ||
+               attributes.type == hipMemoryTypeUnregistered) {
         numa_free(addr, size);
     } else {
         LOG(ERROR) << "Unknown memory type, " << addr << " " << attributes.type;
@@ -286,7 +330,8 @@ int initiator() {
     std::vector<void *> addr(NR_SOCKETS, nullptr);
     int buffer_num = NR_SOCKETS;
 
-#ifdef USE_CUDA
+// TODO : name prefix support cuda/rocm/other-type-gpus
+#if defined(USE_CUDA) || defined(USE_ROCM)
     buffer_num = FLAGS_use_vram ? 1 : NR_SOCKETS;
     if (FLAGS_use_vram) LOG(INFO) << "VRAM is used";
     for (int i = 0; i < buffer_num; ++i) {

@@ -53,6 +53,7 @@ Mooncake 目前仅支持 Linux 操作系统，并且依赖以下软件：
 ### 高级编译选项
 Mooncake 支持在执行 `cmake` 命令期间添加下列高级编译选项：
 - `-DUSE_CUDA=[ON|OFF]`：编译 Transfer Engine 时启用或关闭 GPU Direct RDMA 功能的支持。仅支持 NVIDIA CUDA，需要事先安装相应的依赖库。（不包含在 `dependencies.sh` 脚本中）。默认关闭。
+- `-DUSE_ROCM=[ON|OFF]`：编译 Transfer Engine 时启用或关闭 GPU Direct RDMA 功能的支持。支持 AMD ROCM平台，需要事先安装相应的依赖库。（不包含在 `dependencies.sh` 脚本中）。默认关闭。
 - `-DUSE_CXL=[ON|OFF]`：编译 Transfer Engine 时启用或关闭 CXL 协议的支持。默认关闭。
 - `-DWITH_P2P_STORE=[ON|OFF]`：编译 P2P Store 及示例程序，默认开启。
 - `-DWITH_ALLOCATOR=[ON|OFF]`：编译 Managed Store 所用的中心分配器模块，默认开启。

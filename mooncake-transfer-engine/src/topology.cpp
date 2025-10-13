@@ -26,6 +26,10 @@
 #include <cuda_runtime.h>
 #endif
 
+#ifdef USE_ROCM
+#include <hip/hip_runtime.h>
+#endif
+
 #include <ctype.h>
 #include <dirent.h>
 #include <infiniband/verbs.h>
@@ -214,6 +218,92 @@ static std::vector<TopologyEntry> discoverCudaTopology(
 
 #endif  // USE_CUDA
 
+#ifdef USE_ROCM
+static int getPciDistance(const char *bus1, const char *bus2) {
+    char buf[PATH_MAX];
+    char path1[PATH_MAX];
+    char path2[PATH_MAX];
+    snprintf(buf, sizeof(buf), "/sys/bus/pci/devices/%s", bus1);
+    if (realpath(buf, path1) == NULL) {
+        return -1;
+    }
+    snprintf(buf, sizeof(buf), "/sys/bus/pci/devices/%s", bus2);
+    if (realpath(buf, path2) == NULL) {
+        return -1;
+    }
+
+    char *ptr1 = path1;
+    char *ptr2 = path2;
+    while (*ptr1 && *ptr1 == *ptr2) {
+        ptr1++;
+        ptr2++;
+    }
+    int distance = 0;
+    for (; *ptr1; ptr1++) {
+        distance += (*ptr1 == '/');
+    }
+    for (; *ptr2; ptr2++) {
+        distance += (*ptr2 == '/');
+    }
+
+    return distance;
+}
+
+static std::vector<TopologyEntry> discoverRocmTopology(
+    const std::vector<InfinibandDevice> &all_hca) {
+    std::vector<TopologyEntry> topology;
+    int device_count;
+    if (hipGetDeviceCount(&device_count) != hipSuccess) {
+        device_count = 0;
+    }
+    for (int i = 0; i < device_count; i++) {
+        char pci_bus_id[20];
+        if (hipDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), i) !=
+            hipSuccess) {
+            continue;
+        }
+        for (char *ch = pci_bus_id; (*ch = tolower(*ch)); ch++);
+
+        std::vector<std::string> preferred_hca;
+        std::vector<std::string> avail_hca;
+
+        // Find HCAs with minimum distance in one pass
+        int min_distance = INT_MAX;
+        std::vector<std::string> min_distance_hcas;
+
+        for (const auto &hca : all_hca) {
+            int distance = getPciDistance(hca.pci_bus_id.c_str(), pci_bus_id);
+            if (distance >= 0) {
+                if (distance < min_distance) {
+                    min_distance = distance;
+                    min_distance_hcas.clear();
+                    min_distance_hcas.push_back(hca.name);
+                } else if (distance == min_distance) {
+                    min_distance_hcas.push_back(hca.name);
+                }
+            }
+        }
+
+        // Add HCAs with minimum distance to preferred_hca, others to avail_hca
+        for (const auto &hca : all_hca) {
+            if (std::find(min_distance_hcas.begin(), min_distance_hcas.end(),
+                          hca.name) != min_distance_hcas.end()) {
+                preferred_hca.push_back(hca.name);
+            } else {
+                avail_hca.push_back(hca.name);
+            }
+        }
+        // TODO : change topology entry cuda to rocm
+        topology.push_back(
+            TopologyEntry{.name = "cuda:" + std::to_string(i),
+                          .preferred_hca = std::move(preferred_hca),
+                          .avail_hca = std::move(avail_hca)});
+    }
+    return topology;
+}
+
+#endif  // USE_ROCM
+
 Topology::Topology() {}
 
 Topology::~Topology() {}
@@ -242,6 +332,13 @@ int Topology::discover(const std::vector<std::string> &filter) {
     }
 #ifdef USE_CUDA
     for (auto &ent : discoverCudaTopology(all_hca)) {
+        matrix_[ent.name] = ent;
+    }
+#endif
+
+
+#ifdef USE_ROCM
+    for (auto &ent : discoverRocmTopology(all_hca)) {
         matrix_[ent.name] = ent;
     }
 #endif
